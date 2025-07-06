@@ -4,50 +4,54 @@
 # Used automatically by x11docker if image is available locally.
 # Can be configured with option --xc.
 #
-# Build image with: x11docker --build x11docker/xserver
+# Build image with: podman build -t x11docker/xserver .
 # The build will take a while because nxagent is compiled from source.
 #
 # x11docker on github: https://github.com/mviereck/x11docker
-
-FROM debian:bullseye AS nxbuild
 
 #########################
 
 # build patched nxagent from source. Allows to run with /tmp/.X11-unix not to be owned by root.
 # https://github.com/ArcticaProject/nx-libs/issues/1034
-RUN echo "deb-src http://deb.debian.org/debian bullseye main" >> /etc/apt/sources.list && \
-    apt-get update && \
-    apt-get install -y build-essential devscripts && \
-    apt-get build-dep -y nxagent && \
-    mkdir /nxbuild && \
-    cd /nxbuild && \
-    apt-get source nxagent && \
-    cd nx-libs-3.5.99.26 && \
-    sed -i 's/# define XtransFailSoft NO/# define XtransFailSoft YES/' nx-X11/config/cf/X11.rules && \
-    debuild -b -uc -us
+FROM docker.io/ubuntu:latest AS builder
+RUN <<EOF
+sed -i 's/Types: deb/\0 deb-src/g' /etc/apt/sources.list.d/ubuntu.sources
+DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y build-essential devscripts
+apt-get build-dep -y nxagent
+mkdir /nxbuild
+cd /nxbuild
+apt-get source nxagent
+cd nx-libs-*
+sed -i 's/# define XtransFailSoft NO/# define XtransFailSoft YES/' nx-X11/config/cf/X11.rules
+debuild -b -uc -us
+EOF
 
-FROM debian:bullseye
-COPY --from=nxbuild /nxbuild/nxagent_3.*.deb /nxagent.deb
+# compile fake MIT-SHM library
+COPY XlibNoSHM.c /XlibNoSHM.c
+RUN <<EOF
+env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    gcc \
+    libc6-dev \
+    libx11-dev
+gcc -shared -o /XlibNoSHM.so /XlibNoSHM.c
+EOF
 
-# cleanup script for use after apt-get
-RUN echo '#! /bin/sh\n\
-env DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y\n\
-apt-get clean\n\
-find /var/lib/apt/lists -type f -delete\n\
-find /var/cache -type f -delete\n\
-find /var/log -type f -delete\n\
-exit 0\n\
-' > /apt_cleanup && chmod +x /apt_cleanup
+#########################
+
+FROM docker.io/ubuntu:latest
+COPY --from=builder /nxbuild/nxagent_*.deb /nxagent.deb
+COPY --from=builder /XlibNoSHM.so /XlibNoSHM.so
+
+# update apt cache
+RUN env DEBIAN_FRONTEND=noninteractive apt-get update
 
 # install nxagent
-RUN apt-get update && \
-    env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        /nxagent.deb && \
-    /apt_cleanup
+RUN env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /nxagent.deb
 
 # X servers
-RUN apt-get update && \
-    env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+RUN env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         kwin-wayland \
         kwin-wayland-backend-drm \
         kwin-wayland-backend-wayland \
@@ -57,54 +61,23 @@ RUN apt-get update && \
         xserver-xorg \
         xserver-xorg-legacy \
         xvfb \
-        xwayland && \
-    /apt_cleanup
+        xwayland
 
-# xpra from xpra repository
-RUN apt-get update && \
-    env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        wget \
-        gnupg \
-        ca-certificates && \
-    wget -q http://xpra.org/gpg.asc -O xpra-gpg.asc && \
-    apt-key add xpra-gpg.asc && \
-    echo "deb http://xpra.org/ bullseye main" > /etc/apt/sources.list.d/xpra.list && \
-    apt-get update && \
-    env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+# xpra
+RUN env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         xpra  \
         ibus \
-        python3-rencode && \
-    apt-get remove --purge -y \
-        wget \
-        gnupg \
-        ca-certificates && \
-    /apt_cleanup
+        python3-rencode
 
 # Window manager openbox with disabled context menu
-RUN apt-get update && \
-    env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        openbox && \
-    sed -i /ShowMenu/d         /etc/xdg/openbox/rc.xml && \
-    sed -i s/NLIMC/NLMC/       /etc/xdg/openbox/rc.xml && \
-    /apt_cleanup
-
-# compile fake MIT-SHM library
-COPY XlibNoSHM.c /XlibNoSHM.c
-RUN apt-get update && \
-    env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            gcc \
-            libc6-dev \
-            libx11-dev && \
-    gcc -shared -o /XlibNoSHM.so /XlibNoSHM.c && \
-    apt-get remove --purge -y \
-        gcc \
-        libc6-dev \
-        libx11-dev && \
-    /apt_cleanup
+RUN <<EOF
+env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openbox
+sed -i /ShowMenu/d         /etc/xdg/openbox/rc.xml
+sed -i s/NLIMC/NLMC/       /etc/xdg/openbox/rc.xml
+EOF
 
 # tools
-RUN apt-get update && \
-    env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+RUN env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         catatonit \
         procps \
         psmisc \
@@ -123,12 +96,20 @@ RUN apt-get update && \
         xclip \
         xdotool \
         xfishtank \
-        xinit && \
-    /apt_cleanup
+        xinit
+
+# cleanup
+RUN <<EOF
+env DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y
+apt-get clean
+find /var/lib/apt/lists -type f -delete
+find /var/cache -type f -delete
+find /var/log -type f -delete
+EOF
 
 # configure Xorg wrapper
-RUN echo 'allowed_users=anybody' >/etc/X11/Xwrapper.config && \
-    echo 'needs_root_rights=yes' >>/etc/X11/Xwrapper.config
+RUN echo 'allowed_users=anybody' > /etc/X11/Xwrapper.config && \
+    echo 'needs_root_rights=yes' >> /etc/X11/Xwrapper.config
 
 # wrapper to run weston either on console or within DISPLAY or WAYLAND_DISPLAY
 # note: includes setuid for agetty to allow it for unprivileged users
@@ -145,7 +126,7 @@ case "$DISPLAY$WAYLAND_DISPLAY" in \n\
     exec /usr/bin/weston "$@" \n\
   ;; \n\
 esac \n\
-' >/usr/local/bin/weston && \
+' > /usr/local/bin/weston && \
     chmod +x /usr/local/bin/weston && \
     ln /usr/local/bin/weston /usr/local/bin/weston-launch
 
@@ -153,7 +134,7 @@ esac \n\
 RUN mkdir -p /home/container && chmod 777 /home/container
 ENV HOME=/home/container
 
-LABEL version='1.10'
+LABEL version='2.0'
 LABEL options='--kwin --nxagent --weston --weston-xwayland --xephyr --xpra --xpra-xwayland --xpra2 --xpra2-xwayland --xorg --xvfb --xwayland'
 LABEL tools='catatonit cvt glxinfo iceauth setxkbmap socat \
              vainfo vdpauinfo virgl wl-copy wl-paste wmctrl \
